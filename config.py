@@ -3,10 +3,10 @@ import os
 
 load_dotenv()
 
-HOST = os.getnenv('HOST')
-PORT =os.getnenv('PORT')
-USER = os.getnenv('USER')
-PASSWORD = os.getnenv('PASSWORD')
+HOST = os.getenv('HOST')
+PORT =os.getenv('PORT')
+USER = os.getenv('USER')
+PASSWORD = os.getenv('PASSWORD')
 
 MYSQL_HOST = os.getenv('MYSQL_HOST')
 MYSQL_DB = os.getenv('MYSQL_DB')
