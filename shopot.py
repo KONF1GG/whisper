@@ -18,7 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Настройка логирования
 logging.basicConfig(
     filename=LOG_FILE,
-    level=logging.WARNING,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
