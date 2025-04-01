@@ -1,0 +1,6 @@
+.venv
+.env
+*.wav
+*.mp3
+.DS_Store
+logs
