@@ -242,6 +242,7 @@ def main_loop():
                         try:
                             with gpu_lock(timeout=0):
                                 pass
+                            time.sleep(5)
                         except RuntimeError:
                             logging.info("GPU занят другим сервисом, выгружаю модель")
                             unload_model()
