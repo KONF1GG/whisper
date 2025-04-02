@@ -8,6 +8,10 @@ import logging
 import time
 from datetime import datetime
 from config import MYSQL_HOST, MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER, SFTP_HOST, SFTP_PASSWORD, SFTP_USER
+import torch
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 # Константы
 CURRENT_DIR = os.getcwd()
@@ -154,7 +158,7 @@ def process_audio(id, voip_file, caller):
 def channels_whis(file_path, id, caller):
     try:
         cnx = get_db_connection()
-        channel_number = int(os.path.basename(file_path).split('_')[0])
+        channel_number = int(os.path.basename(file_path).split('_')[1])
         audio = whisperx.load_audio(file_path)
         result = model.transcribe(audio, batch_size=batch_size, language='ru')
         
