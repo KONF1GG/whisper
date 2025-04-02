@@ -19,16 +19,20 @@ CURRENT_DIR = os.getcwd()
 LOG_FILE = os.path.join(CURRENT_DIR, 'whisp.log')
 TEMP_DIR = os.path.join(CURRENT_DIR, 'temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
-IDLE_TIMEOUT = 300  # Время бездействия в секундах (5 минут), после которого модель выгружается
+IDLE_TIMEOUT = 10  # Время ожидания перед выгрузкой модели (в секундах)
 
-# Настройка логирования
+# Настройка логирования (только для приложения)
 logging.basicConfig(
     filename=LOG_FILE,
-    level=logging.WARNING,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-# Глобальные переменные для управления моделью
+# Отключаем логирование для paramiko и pysftp
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+logging.getLogger("pysftp").setLevel(logging.WARNING)
+
+# Глобальные переменные
 model = None
 last_task_time = None
 device = 'cuda'
@@ -36,7 +40,6 @@ batch_size = 4
 compute_type = 'int8'
 
 def load_model():
-    """Загрузка модели в GPU"""
     global model
     if model is None:
         logging.info("Загружаю модель Whisper в GPU...")
@@ -44,7 +47,6 @@ def load_model():
     return model
 
 def unload_model():
-    """Выгрузка модели из GPU"""
     global model
     if model is not None:
         logging.info("Выгружаю модель Whisper из GPU...")
@@ -105,7 +107,6 @@ def process_audio(id, voip_file, caller):
     temp_files = []
 
     try:
-        # Загрузка mp3
         mp3_path = os.path.join(TEMP_DIR, f'{id}.mp3')
         remote_mp3_path = f'/mnt/samba/mp3/{voip_file}{id}.mp3'
 
@@ -118,9 +119,9 @@ def process_audio(id, voip_file, caller):
             if not download_file(sftp, remote_mp3_path, mp3_path):
                 return
 
-        # Конвертируем в WAV
         wav_path = os.path.join(TEMP_DIR, f'{id}.wav')
-        os.system(f'ffmpeg -i {mp3_path} -vn -ar 44100 -ac 2 -ab 192 -f wav {wav_path}')
+        # Перенаправляем вывод ffmpeg в /dev/null
+        os.system(f'ffmpeg -i {mp3_path} -vn -ar 44100 -ac 2 -ab 192 -f wav {wav_path} > /dev/null 2>&1')
         temp_files.append(wav_path)
 
         with wave.open(wav_path) as audio_file:
@@ -134,27 +135,22 @@ def process_audio(id, voip_file, caller):
         ch1_path, ch2_path = process_stereo_channels(id, values, framerate, sampwidth, channels)
         temp_files.extend([ch1_path, ch2_path])
 
-        # Использование GPU с блокировкой
-        with gpu_lock(timeout=30):  # Ждать GPU не более 30 секунд
-            model_instance = load_model()  # Загружаем модель, если еще не загружена
+        with gpu_lock(timeout=30):
+            model_instance = load_model()
             start_time = datetime.now()
             audio = whisperx.load_audio(wav_path)
             result = model_instance.transcribe(audio, batch_size=batch_size, language='ru')
             processing_time = str(datetime.now() - start_time).split('.')[0]
 
-            # Транскрипция каналов
             channels_whis(ch1_path, id, caller, model_instance)
             channels_whis(ch2_path, id, caller, model_instance)
 
-        # Обновляем время последней задачи
         last_task_time = time.time()
 
-        # Обновляем базу данных
         cnx = get_db_connection()
         try:
             with cnx.cursor() as cursor:
                 cursor.execute("UPDATE asterisk SET whisper1 = 1 WHERE id = %s", (id,))
-                
                 cursor.execute('DELETE FROM whisper WHERE id = %s', (id,))
                 insert_query = """
                     INSERT INTO whisper 
@@ -169,7 +165,6 @@ def process_audio(id, voip_file, caller):
                     "2"
                 ))
                 cnx.commit()
-
         finally:
             cnx.close()
 
@@ -221,6 +216,7 @@ def main_loop():
                             )
                             cnx.commit()
                         
+                        logging.info(f"Обрабатываю задачу с ID {id}")
                         process_audio(
                             id=id,
                             voip_file=row[4],
@@ -231,25 +227,31 @@ def main_loop():
                         logging.error(f"Main loop error for {id}: {str(e)}")
                         cnx.rollback()
                 else:
-                    # Проверяем, сколько времени прошло с последней задачи
-                    if last_task_time and (time.time() - last_task_time) > IDLE_TIMEOUT:
-                        unload_model()  # Выгружаем модель, если нет задач
-                        last_task_time = None  # Сбрасываем таймер
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM asterisk 
+                        WHERE whisper1 = 0 AND whisper = 0
+                    """)
+                    pending_tasks = cursor.fetchone()[0]
+
+                    if pending_tasks == 0 and last_task_time and (time.time() - last_task_time) > IDLE_TIMEOUT:
+                        logging.info("Нет задач, выгружаю модель")
+                        unload_model()
+                        last_task_time = None
+
+                    if model is not None:
+                        try:
+                            with gpu_lock(timeout=0):
+                                pass
+                        except RuntimeError:
+                            logging.info("GPU занят другим сервисом, выгружаю модель")
+                            unload_model()
+                            last_task_time = None
 
         except Exception as e:
             logging.error(f"Database connection error: {str(e)}")
         finally:
             if 'cnx' in locals() and cnx.is_connected():
                 cnx.close()
-
-        # Проверяем, занят ли GPU другим сервисом
-        try:
-            with gpu_lock(timeout=0):  # Проверяем без ожидания
-                pass
-        except RuntimeError:
-            # Если GPU занят, выгружаем модель
-            unload_model()
-            last_task_time = None
 
         time.sleep(1)
 
