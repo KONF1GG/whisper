@@ -11,6 +11,7 @@ services:
       - .env
     volumes:
       - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - shared-data:/shared
     deploy:
       resources:
         reservations:
@@ -18,3 +19,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+
+volumes:
+  shared-data:
+    external: true

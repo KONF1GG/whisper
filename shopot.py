@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from config import MYSQL_HOST, MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER, SFTP_HOST, SFTP_PASSWORD, SFTP_USER
 import torch
+from GPU_control import gpu_lock
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -18,6 +19,7 @@ CURRENT_DIR = os.getcwd()
 LOG_FILE = os.path.join(CURRENT_DIR, 'whisp.log')
 TEMP_DIR = os.path.join(CURRENT_DIR, 'temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
+IDLE_TIMEOUT = 300  # Время бездействия в секундах (5 минут), после которого модель выгружается
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,11 +28,29 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-# Инициализация виспер модели
+# Глобальные переменные для управления моделью
+model = None
+last_task_time = None
 device = 'cuda'
 batch_size = 4
 compute_type = 'int8'
-model = whisperx.load_model("large-v3", device, compute_type=compute_type, language='ru')
+
+def load_model():
+    """Загрузка модели в GPU"""
+    global model
+    if model is None:
+        logging.info("Загружаю модель Whisper в GPU...")
+        model = whisperx.load_model("large-v3", device, compute_type=compute_type, language='ru')
+    return model
+
+def unload_model():
+    """Выгрузка модели из GPU"""
+    global model
+    if model is not None:
+        logging.info("Выгружаю модель Whisper из GPU...")
+        del model
+        torch.cuda.empty_cache()
+        model = None
 
 def to_string(segments):
     return ''.join(str(seg['text']) for seg in segments)
@@ -50,12 +70,10 @@ def process_stereo_channels(id, values, framerate, sampwidth, channels):
             cursor.execute("UPDATE asterisk SET stereo = 1 WHERE id = %s", (id,))
             cnx.commit()
 
-        # Обработка 1 канала
         ch1_values = [0 if i % 2 == 0 else val for i, val in enumerate(values)]
         ch1_path = os.path.join(TEMP_DIR, f'{id}_1_channel.wav')
         create_wav_file(ch1_path, framerate, sampwidth, channels, ch1_values)
 
-        # Обработка 2 канала
         ch2_values = [0 if i % 2 != 0 else val for i, val in enumerate(values)]
         ch2_path = os.path.join(TEMP_DIR, f'{id}_2_channel.wav')
         create_wav_file(ch2_path, framerate, sampwidth, channels, ch2_values)
@@ -81,6 +99,7 @@ def download_file(sftp, remote_path, local_path):
         return False
 
 def process_audio(id, voip_file, caller):
+    global last_task_time
     cnopts = pysftp.CnOpts()
     cnopts.hostkeys = None
     temp_files = []
@@ -115,11 +134,20 @@ def process_audio(id, voip_file, caller):
         ch1_path, ch2_path = process_stereo_channels(id, values, framerate, sampwidth, channels)
         temp_files.extend([ch1_path, ch2_path])
 
-        # Использование модели для транскрипции
-        start_time = datetime.now()
-        audio = whisperx.load_audio(wav_path)
-        result = model.transcribe(audio, batch_size=batch_size, language='ru')
-        processing_time = str(datetime.now() - start_time).split('.')[0]
+        # Использование GPU с блокировкой
+        with gpu_lock(timeout=30):  # Ждать GPU не более 30 секунд
+            model_instance = load_model()  # Загружаем модель, если еще не загружена
+            start_time = datetime.now()
+            audio = whisperx.load_audio(wav_path)
+            result = model_instance.transcribe(audio, batch_size=batch_size, language='ru')
+            processing_time = str(datetime.now() - start_time).split('.')[0]
+
+            # Транскрипция каналов
+            channels_whis(ch1_path, id, caller, model_instance)
+            channels_whis(ch2_path, id, caller, model_instance)
+
+        # Обновляем время последней задачи
+        last_task_time = time.time()
 
         # Обновляем базу данных
         cnx = get_db_connection()
@@ -142,9 +170,6 @@ def process_audio(id, voip_file, caller):
                 ))
                 cnx.commit()
 
-            channels_whis(ch1_path, id, caller)
-            channels_whis(ch2_path, id, caller)
-
         finally:
             cnx.close()
 
@@ -155,12 +180,12 @@ def process_audio(id, voip_file, caller):
             if os.path.exists(f):
                 os.remove(f)
 
-def channels_whis(file_path, id, caller):
+def channels_whis(file_path, id, caller, model_instance):
     try:
         cnx = get_db_connection()
         channel_number = int(os.path.basename(file_path).split('_')[1])
         audio = whisperx.load_audio(file_path)
-        result = model.transcribe(audio, batch_size=batch_size, language='ru')
+        result = model_instance.transcribe(audio, batch_size=batch_size, language='ru')
         
         with cnx.cursor() as cursor:
             if (channel_number == 1 and caller == 'incoming') or (channel_number == 2 and caller == 'outcoming'):
@@ -174,6 +199,7 @@ def channels_whis(file_path, id, caller):
         cnx.close()
 
 def main_loop():
+    global last_task_time
     while True:
         try:
             cnx = get_db_connection()
@@ -204,13 +230,28 @@ def main_loop():
                     except Exception as e:
                         logging.error(f"Main loop error for {id}: {str(e)}")
                         cnx.rollback()
+                else:
+                    # Проверяем, сколько времени прошло с последней задачи
+                    if last_task_time and (time.time() - last_task_time) > IDLE_TIMEOUT:
+                        unload_model()  # Выгружаем модель, если нет задач
+                        last_task_time = None  # Сбрасываем таймер
 
         except Exception as e:
             logging.error(f"Database connection error: {str(e)}")
         finally:
             if 'cnx' in locals() and cnx.is_connected():
                 cnx.close()
-            time.sleep(1)
+
+        # Проверяем, занят ли GPU другим сервисом
+        try:
+            with gpu_lock(timeout=0):  # Проверяем без ожидания
+                pass
+        except RuntimeError:
+            # Если GPU занят, выгружаем модель
+            unload_model()
+            last_task_time = None
+
+        time.sleep(1)
 
 if __name__ == "__main__":
     main_loop()
