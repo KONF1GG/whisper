@@ -144,6 +144,7 @@ def process_audio(id, voip_file, caller):
 
             channels_whis(ch1_path, id, caller, model_instance)
             channels_whis(ch2_path, id, caller, model_instance)
+        unload_model()
 
         last_task_time = time.time()
 
@@ -224,6 +225,7 @@ def main_loop():
                         )
 
                     except Exception as e:
+                        unload_model()
                         logging.error(f"Main loop error for {id}: {str(e)}")
                         cnx.rollback()
                 else:
@@ -250,6 +252,8 @@ def main_loop():
 
         except Exception as e:
             logging.error(f"Database connection error: {str(e)}")
+            unload_model()
+
         finally:
             if 'cnx' in locals() and cnx.is_connected():
                 cnx.close()
