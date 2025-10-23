@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   app:
     build: .
@@ -10,6 +8,7 @@ services:
     volumes:
       - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub
       - shared-data:/shared
+      - ./logs:/app/logs
     deploy:
       resources:
         reservations:
@@ -17,7 +16,33 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; exit(0 if torch.cuda.is_available() else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  asterisk-monitor:
+    build: .
+    restart: always
+    container_name: asterisk-monitor
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - /opt/python/logs:/opt/python/logs
+    command: ["python", "aster.py"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   shared-data:
