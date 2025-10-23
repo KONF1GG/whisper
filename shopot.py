@@ -22,36 +22,20 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 IDLE_TIMEOUT = 10
 MAX_RETRIES = 2  # Максимальное количество повторных попыток
 
-# Настройка логирования с местным временем
+# Настройка логирования
 # Очищаем существующие хендлеры
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
-class LocalTimeFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        # Получаем местное время (UTC+5)
-        from datetime import datetime, timezone, timedelta
-        dt = datetime.fromtimestamp(record.created, tz=timezone(timedelta(hours=5)))
-        if datefmt:
-            s = dt.strftime(datefmt)
-        else:
-            s = dt.strftime('%Y-%m-%d %H:%M:%S')
-        return s
-
-formatter = LocalTimeFormatter('%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s')
-
 logging.basicConfig(
     level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
         logging.StreamHandler()  # Добавляем вывод в консоль
     ],
     force=True  # Принудительно перезаписываем конфигурацию
 )
-
-# Применяем форматтер ко всем хендлерам
-for handler in logging.root.handlers:
-    handler.setFormatter(formatter)
 logging.getLogger("paramiko").setLevel(logging.WARNING)
 logging.getLogger("pysftp").setLevel(logging.WARNING)
 logging.getLogger("torch").setLevel(logging.WARNING)

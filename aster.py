@@ -8,32 +8,14 @@ import mysql.connector
 import logging
 from config import HOST, PORT, USER, PASSWORD, MYSQL_HOST, MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER
 
-# Настройка логирования в консоль с местным временем
-import logging.handlers
-
-class LocalTimeFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        # Получаем местное время (UTC+5)
-        import datetime
-        dt = datetime.datetime.fromtimestamp(record.created, tz=datetime.timezone(datetime.timedelta(hours=5)))
-        if datefmt:
-            s = dt.strftime(datefmt)
-        else:
-            s = dt.strftime('%Y-%m-%d %H:%M:%S')
-        return s
-
-formatter = LocalTimeFormatter('%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s')
-
+# Настройка логирования в консоль
 logging.basicConfig(
     level=logging.INFO, 
+    format="%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s",
     handlers=[
         logging.StreamHandler()
     ]
 )
-
-# Применяем форматтер к корневому логгеру
-for handler in logging.root.handlers:
-    handler.setFormatter(formatter)
 
 def get_local_time():
     """Получает текущее местное время (UTC+5)"""
