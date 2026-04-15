@@ -7,58 +7,55 @@ import whisperx
 import logging
 import time
 from datetime import datetime
-from config import MYSQL_HOST, MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER, SFTP_HOST, SFTP_PASSWORD, SFTP_USER
+from config import (
+    MYSQL_HOST,
+    MYSQL_DB,
+    MYSQL_PASSWORD,
+    MYSQL_USER,
+    SFTP_HOST,
+    SFTP_PASSWORD,
+    SFTP_USER,
+)
 import torch
 from GPU_control import gpu_lock
+from logging_utils import setup_logging
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 # Константы
 CURRENT_DIR = os.getcwd()
-LOG_FILE = os.path.join(CURRENT_DIR, 'whisp.log')
-TEMP_DIR = os.path.join(CURRENT_DIR, 'temp')
+TEMP_DIR = os.path.join(CURRENT_DIR, "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 IDLE_TIMEOUT = 10
 MAX_RETRIES = 2  # Максимальное количество повторных попыток
 
-# Настройка логирования
-# Очищаем существующие хендлеры
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()  # Добавляем вывод в консоль
-    ],
-    force=True  # Принудительно перезаписываем конфигурацию
-)
-logging.getLogger("paramiko").setLevel(logging.WARNING)
-logging.getLogger("pysftp").setLevel(logging.WARNING)
-logging.getLogger("torch").setLevel(logging.WARNING)
+# Единая настройка логирования для сервиса транскрибации.
+setup_logging(service_name="whisper-worker")
 logging.getLogger("whisperx").setLevel(logging.INFO)
 
 # Глобальные переменные
 model = None
 last_task_time = None
-device = 'cuda'
+device = "cuda"
 batch_size = 4
-compute_type = 'int8'
+compute_type = "int8"
+
 
 def load_model():
     global model
     if model is None:
         try:
             logging.info("Загружаю модель Whisper в GPU...")
-            model = whisperx.load_model("large-v3", device, compute_type=compute_type, language='ru')
+            model = whisperx.load_model(
+                "large-v3", device, compute_type=compute_type, language="ru"
+            )
             logging.info("Модель Whisper успешно загружена")
         except Exception as e:
             logging.error(f"Ошибка загрузки модели: {str(e)}")
             raise
     return model
+
 
 def unload_model():
     global model
@@ -67,6 +64,7 @@ def unload_model():
         del model
         torch.cuda.empty_cache()
         model = None
+
 
 def handle_cuda_errors(func):
     def wrapper(*args, **kwargs):
@@ -80,36 +78,40 @@ def handle_cuda_errors(func):
         except Exception as e:
             logging.error(f"Error in {func.__name__}: {str(e)}")
             raise
+
     return wrapper
+
 
 @handle_cuda_errors
 def transcribe_audio(model_instance, audio_path):
     audio = whisperx.load_audio(audio_path)
-    return model_instance.transcribe(audio, batch_size=batch_size, language='ru')
+    return model_instance.transcribe(audio, batch_size=batch_size, language="ru")
+
 
 def get_db_connection():
     return mysql.connector.connect(
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        host=MYSQL_HOST,
-        database=MYSQL_DB
+        user=MYSQL_USER, password=MYSQL_PASSWORD, host=MYSQL_HOST, database=MYSQL_DB
     )
+
 
 def update_database(id, field, value):
     cnx = get_db_connection()
     try:
         with cnx.cursor() as cursor:
-            cursor.execute(f"UPDATE asterisk SET {field} = %s WHERE id = %s", (value, id))
+            cursor.execute(
+                f"UPDATE asterisk SET {field} = %s WHERE id = %s", (value, id)
+            )
             cnx.commit()
     finally:
         cnx.close()
 
+
 def process_stereo_channels(id, values, framerate, sampwidth, channels):
     try:
-        update_database(id, 'stereo', 1)
+        update_database(id, "stereo", 1)
 
-        ch1_path = os.path.join(TEMP_DIR, f'{id}_1_channel.wav')
-        ch2_path = os.path.join(TEMP_DIR, f'{id}_2_channel.wav')
+        ch1_path = os.path.join(TEMP_DIR, f"{id}_1_channel.wav")
+        ch2_path = os.path.join(TEMP_DIR, f"{id}_2_channel.wav")
 
         for path, channel_values in [(ch1_path, values[::2]), (ch2_path, values[1::2])]:
             with wave.open(path, "wb") as out_file:
@@ -124,6 +126,7 @@ def process_stereo_channels(id, values, framerate, sampwidth, channels):
         logging.error(f"Error processing stereo channels: {str(e)}")
         raise
 
+
 def download_file(sftp, remote_path, local_path):
     try:
         sftp.get(remote_path, local_path)
@@ -132,28 +135,33 @@ def download_file(sftp, remote_path, local_path):
         logging.error(f"Download failed: {str(e)}")
         return False
 
+
 def process_audio(id, voip_file, caller):
     global last_task_time
     logging.info(f"🎯 Начинаю обработку задачи {id}")
     logging.info(f"📋 Параметры: voip_file={voip_file}, caller={caller}")
-    
+
     cnopts = pysftp.CnOpts()
     cnopts.hostkeys = None
     temp_files = []
 
     try:
         # Загрузка и конвертация аудио
-        mp3_path = os.path.join(TEMP_DIR, f'{id}.mp3')
-        remote_mp3_path = f'/mnt/samba/mp3/{voip_file}{id}.mp3'
+        mp3_path = os.path.join(TEMP_DIR, f"{id}.mp3")
+        remote_mp3_path = f"/mnt/samba/mp3/{voip_file}{id}.mp3"
 
-        with pysftp.Connection(SFTP_HOST, username=SFTP_USER, password=SFTP_PASSWORD, cnopts=cnopts) as sftp:
+        with pysftp.Connection(
+            SFTP_HOST, username=SFTP_USER, password=SFTP_PASSWORD, cnopts=cnopts
+        ) as sftp:
             if not download_file(sftp, remote_mp3_path, mp3_path):
                 logging.error(f"❌ Файл не найден: {remote_mp3_path}")
                 mark_task_failed(id)
                 return
 
-        wav_path = os.path.join(TEMP_DIR, f'{id}.wav')
-        os.system(f'ffmpeg -i {mp3_path} -vn -ar 44100 -ac 2 -ab 192 -f wav {wav_path} > /dev/null 2>&1')
+        wav_path = os.path.join(TEMP_DIR, f"{id}.wav")
+        os.system(
+            f"ffmpeg -i {mp3_path} -vn -ar 44100 -ac 2 -ab 192 -f wav {wav_path} > /dev/null 2>&1"
+        )
         temp_files.append(wav_path)
 
         # Обработка аудио
@@ -165,23 +173,27 @@ def process_audio(id, voip_file, caller):
             samples = audio_file.readframes(nframes)
             values = list(struct.unpack(f"<{nframes * channels}h", samples))
 
-        ch1_path, ch2_path = process_stereo_channels(id, values, framerate, sampwidth, channels)
+        ch1_path, ch2_path = process_stereo_channels(
+            id, values, framerate, sampwidth, channels
+        )
         temp_files.extend([ch1_path, ch2_path])
 
         # Обработка с повторными попытками
         for attempt in range(MAX_RETRIES):
             try:
-                logging.info(f"🔄 Попытка {attempt + 1}/{MAX_RETRIES} обработки задачи {id}")
+                logging.info(
+                    f"🔄 Попытка {attempt + 1}/{MAX_RETRIES} обработки задачи {id}"
+                )
                 logging.info("🔒 Пытаюсь захватить GPU...")
-                
+
                 with gpu_lock(timeout=30):
                     logging.info("✅ GPU захвачен, загружаю модель...")
                     model_instance = load_model()
                     logging.info("✅ Модель загружена, начинаю транскрипцию...")
-                    
+
                     start_time = datetime.now()
                     result = transcribe_audio(model_instance, wav_path)
-                    processing_time = str(datetime.now() - start_time).split('.')[0]
+                    processing_time = str(datetime.now() - start_time).split(".")[0]
                     logging.info(f"✅ Транскрипция завершена за {processing_time}")
 
                     logging.info("🔄 Обрабатываю канал 1...")
@@ -189,7 +201,7 @@ def process_audio(id, voip_file, caller):
                     logging.info("🔄 Обрабатываю канал 2...")
                     process_channel(ch2_path, id, caller, model_instance, 2)
                     logging.info("✅ Обработка каналов завершена")
-                
+
                 logging.info("💾 Сохраняю результат в базу...")
                 update_success(id, processing_time, result)
                 last_task_time = time.time()
@@ -211,21 +223,32 @@ def process_audio(id, voip_file, caller):
         cleanup_resources(temp_files + [mp3_path])
         unload_model()
 
+
 def update_success(id, processing_time, result):
     cnx = get_db_connection()
     try:
         with cnx.cursor() as cursor:
             cursor.execute("UPDATE asterisk SET whisper1 = 1 WHERE id = %s", (id,))
-            cursor.execute('DELETE FROM whisper WHERE id = %s', (id,))
-            cursor.execute("""
+            cursor.execute("DELETE FROM whisper WHERE id = %s", (id,))
+            cursor.execute(
+                """
                 INSERT INTO whisper 
                 (id, text_, titime, employee, friend) 
                 VALUES (%s, %s, %s, %s, %s)
-            """, (id, ''.join(seg['text'] for seg in result['segments']), processing_time, "1", "2"))
+            """,
+                (
+                    id,
+                    "".join(seg["text"] for seg in result["segments"]),
+                    processing_time,
+                    "1",
+                    "2",
+                ),
+            )
             cnx.commit()
             logging.info(f"✅ Задача {id} успешно завершена за {processing_time}")
     finally:
         cnx.close()
+
 
 def mark_task_failed(id):
     try:
@@ -241,6 +264,7 @@ def mark_task_failed(id):
         if cnx.is_connected():
             cnx.close()
 
+
 def cleanup_resources(files):
     for f in files:
         try:
@@ -249,23 +273,30 @@ def cleanup_resources(files):
         except Exception as e:
             logging.error(f"Error deleting file {f}: {str(e)}")
 
+
 @handle_cuda_errors
 def process_channel(file_path, id, caller, model_instance, channel_number):
     cnx = None
     try:
         logging.info(f"🎵 Обрабатываю канал {channel_number} для задачи {id}")
         audio = whisperx.load_audio(file_path)
-        result = model_instance.transcribe(audio, batch_size=batch_size, language='ru')
-        
+        result = model_instance.transcribe(audio, batch_size=batch_size, language="ru")
+
         logging.info(f"✅ Транскрипция канала {channel_number} завершена")
         cnx = get_db_connection()
         with cnx.cursor() as cursor:
-            if (channel_number == 1 and caller == 'incoming') or (channel_number == 2 and caller == 'outcoming'):
-                cursor.execute('UPDATE whisper SET employee = %s WHERE id = %s', 
-                             (''.join(seg['text'] for seg in result['segments']), id))
+            if (channel_number == 1 and caller == "incoming") or (
+                channel_number == 2 and caller == "outcoming"
+            ):
+                cursor.execute(
+                    "UPDATE whisper SET employee = %s WHERE id = %s",
+                    ("".join(seg["text"] for seg in result["segments"]), id),
+                )
             else:
-                cursor.execute('UPDATE whisper SET friend = %s WHERE id = %s', 
-                             (''.join(seg['text'] for seg in result['segments']), id))
+                cursor.execute(
+                    "UPDATE whisper SET friend = %s WHERE id = %s",
+                    ("".join(seg["text"] for seg in result["segments"]), id),
+                )
             cnx.commit()
             logging.info(f"💾 Канал {channel_number} сохранен в базу")
     except Exception as e:
@@ -275,10 +306,11 @@ def process_channel(file_path, id, caller, model_instance, channel_number):
         if cnx and cnx.is_connected():
             cnx.close()
 
+
 def main_loop():
     global last_task_time
     logging.info("🔄 Запуск основного цикла обработки задач")
-    
+
     while True:
         try:
             logging.debug("🔍 Ищу задачи в очереди...")
@@ -304,46 +336,55 @@ def main_loop():
             logging.error(f"Main loop error: {str(e)}")
             time.sleep(2)
         finally:
-            if 'cnx' in locals() and cnx.is_connected():
+            if "cnx" in locals() and cnx.is_connected():
                 cnx.close()
             time.sleep(1)
+
 
 def process_task(row):
     try:
         logging.info(f"🎯 Начинаю обработку задачи {row['id']}")
-        logging.info(f"📋 Данные задачи: voip_file={row['voip_file']}, caller={row['caller']}")
-        
+        logging.info(
+            f"📋 Данные задачи: voip_file={row['voip_file']}, caller={row['caller']}"
+        )
+
         logging.info("💾 Помечаю задачу как 'в обработке'...")
         cnx = get_db_connection()
         with cnx.cursor() as cursor:
-            cursor.execute("UPDATE asterisk SET whisper = 1 WHERE id = %s", (row['id'],))
+            cursor.execute(
+                "UPDATE asterisk SET whisper = 1 WHERE id = %s", (row["id"],)
+            )
             cnx.commit()
         logging.info("✅ Задача помечена как 'в обработке'")
-        
+
         logging.info("🎵 Запускаю обработку аудио...")
-        process_audio(
-            id=row['id'],
-            voip_file=row['voip_file'],
-            caller=row['caller']
-        )
+        process_audio(id=row["id"], voip_file=row["voip_file"], caller=row["caller"])
         logging.info(f"✅ Обработка задачи {row['id']} завершена")
 
     except Exception as e:
         logging.error(f"❌ Ошибка обработки задачи {row['id']}: {str(e)}")
         logging.error(f"📋 Тип ошибки: {type(e).__name__}")
         import traceback
+
         logging.error(f"📋 Трассировка: {traceback.format_exc()}")
-        mark_task_failed(row['id'])
+        mark_task_failed(row["id"])
+
 
 def handle_idle_state():
     global last_task_time
     try:
         cnx = get_db_connection()
         with cnx.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM asterisk WHERE whisper1 = 0 AND whisper = 0")
+            cursor.execute(
+                "SELECT COUNT(*) FROM asterisk WHERE whisper1 = 0 AND whisper = 0"
+            )
             pending_tasks = cursor.fetchone()[0]
 
-            if pending_tasks == 0 and last_task_time and (time.time() - last_task_time) > IDLE_TIMEOUT:
+            if (
+                pending_tasks == 0
+                and last_task_time
+                and (time.time() - last_task_time) > IDLE_TIMEOUT
+            ):
                 logging.info("Нет задач, выгружаю модель")
                 unload_model()
                 last_task_time = None
@@ -353,6 +394,7 @@ def handle_idle_state():
     finally:
         if cnx.is_connected():
             cnx.close()
+
 
 def try_gpu_access():
     try:
@@ -364,6 +406,7 @@ def try_gpu_access():
         unload_model()
         global last_task_time
         last_task_time = None
+
 
 if __name__ == "__main__":
     main_loop()

@@ -1,7 +1,12 @@
 import fcntl
 import time
 import os
+import logging
 from contextlib import contextmanager
+
+
+logger = logging.getLogger("gpu-lock")
+
 
 class GPULock:
     def __init__(self, lock_file_path="/shared/gpu.lock", timeout=None):
@@ -21,13 +26,16 @@ class GPULock:
         while True:
             try:
                 fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                print(f"[{os.getpid()}] Блокировка GPU установлена")
+                logger.info("[%s] Блокировка GPU установлена", os.getpid())
                 return True
             except IOError:
-                if self.timeout is not None and (time.time() - start_time) > self.timeout:
-                    print(f"[{os.getpid()}] Таймаут ожидания GPU истек")
+                if (
+                    self.timeout is not None
+                    and (time.time() - start_time) > self.timeout
+                ):
+                    logger.warning("[%s] Таймаут ожидания GPU истек", os.getpid())
                     return False
-                print(f"[{os.getpid()}] GPU занят, жду...")
+                logger.info("[%s] GPU занят, жду...", os.getpid())
                 time.sleep(1)
 
     def release(self):
@@ -35,7 +43,7 @@ class GPULock:
         if self.lock_file:
             fcntl.flock(self.lock_file, fcntl.LOCK_UN)
             self.lock_file.close()
-            print(f"[{os.getpid()}] Блокировка GPU снята")
+            logger.info("[%s] Блокировка GPU снята", os.getpid())
 
     def __enter__(self):
         """Вход в контекст"""
@@ -46,6 +54,7 @@ class GPULock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Выход из контекста"""
         self.release()
+
 
 @contextmanager
 def gpu_lock(timeout=None):

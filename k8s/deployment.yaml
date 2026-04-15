@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper-stack
+  namespace: apps-gpu
+  labels:
+    app: whisper-stack
+    component: backend
+    gpu: "true"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: whisper-stack
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: whisper-stack
+        component: backend
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.count: "1"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      imagePullSecrets:
+      - name: harbor-prod
+      containers:
+      - name: whisper-worker
+        image: cr-kub.freedom1.ru/microservices/whisper:1.0.0
+        imagePullPolicy: IfNotPresent
+        command: ["python", "shopot.py"]
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            cpu: "2000m"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+        envFrom:
+        - secretRef:
+            name: whisper-secrets
+        - configMapRef:
+            name: whisper-config
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models/huggingface
+        - name: shared-data
+          mountPath: /shared
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "pgrep -f 'python shopot.py' >/dev/null"]
+          initialDelaySeconds: 120
+          periodSeconds: 60
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "python -c \"import torch; import sys; sys.exit(0 if torch.cuda.is_available() else 1)\""]
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+      - name: asterisk-monitor
+        image: cr-kub.freedom1.ru/microservices/whisper:1.0.0
+        imagePullPolicy: IfNotPresent
+        command: ["python", "aster.py"]
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        envFrom:
+        - secretRef:
+            name: whisper-secrets
+        - configMapRef:
+            name: whisper-config
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "pgrep -f 'python aster.py' >/dev/null"]
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "pgrep -f 'python aster.py' >/dev/null"]
+          initialDelaySeconds: 20
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: model-cache
+        hostPath:
+          path: /var/lib/models/huggingface
+          type: DirectoryOrCreate
+      - name: shared-data
+        hostPath:
+          path: /var/shared/gpu-locks
+          type: DirectoryOrCreate
