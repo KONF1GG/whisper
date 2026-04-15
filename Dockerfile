@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LD_LIBRARY_PATH=/opt/conda/pkgs/pytorch-2.1.0-py3.10_cuda11.8_cudnn8.7.0_0/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH
